@@ -39,6 +39,8 @@ static const demo_entry_t DEMOS[] = {
       .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
     { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
       .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
+    { .name = "Fish Smoke", .enter = demo_fish_enter, .exit = demo_fish_exit,
+      .key = demo_fish_key, .start = demo_fish_start, .stop = demo_fish_stop },
 };
 #define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
 #define INPUT_QUEUE_DEPTH 8

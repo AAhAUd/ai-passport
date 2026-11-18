@@ -82,7 +82,8 @@ static void test_food_falls_and_lands(void) {
 
     for (int i = 0; i < 2000; i++) fish_sim_step(&sim);
     assert(sim.food_count == 1);          // ttl 还没到，不该消失
-    assert(sim.food[0].y == Y_MAX);       // 停在缸底
+    // 停在"缸底但鱼够得到"的高度：贴边留 1 格，和鱼的边界余量一致
+    assert(sim.food[0].y == Y_MAX - FISH_SIM_EDGE_MARGIN);
     assert(sim.food[0].vy == 0);          // 触底后不再下落
 
     // 悬浮鱼食（vy=0）不应该自己动
@@ -92,6 +93,25 @@ static void test_food_falls_and_lands(void) {
     int16_t yb = still.food[0].y;
     for (int i = 0; i < 20; i++) fish_sim_step(&still);
     assert(still.food[0].y == yb);
+}
+
+// 落到缸底的鱼食必须吃得到。曾经的 bug：鱼被限制在距边缘 2 格以内，而鱼食落到
+// 最底一行，于是所有鱼卡在够不着的高度上围着食物抽动，直到 TTL 到期（真机复现）。
+static void test_food_resting_on_the_bottom_is_reachable(void) {
+    fish_sim_t sim;
+    fish_sim_init(&sim, 3, 20261118u);
+
+    const int32_t rest = Y_MAX - FISH_SIM_EDGE_MARGIN;
+    assert(fish_sim_drop_food_ex(&sim, 15 * FISH_SIM_ONE, rest, 0, 4000) == 0);
+
+    int steps = 0;
+    while (sim.food_count > 0 && steps < 3000) {
+        fish_sim_step(&sim);
+        steps++;
+    }
+    assert(sim.food_count == 0);        // 吃到了，不是等 TTL 过期
+    assert(steps < 3000);
+    assert_all_inside(&sim);
 }
 
 static void test_drop_food_respects_capacity_and_bounds(void) {
@@ -142,6 +162,7 @@ int main(void) {
     test_food_gets_eaten();
     test_food_expires_without_fish();
     test_food_falls_and_lands();
+    test_food_resting_on_the_bottom_is_reachable();
     test_drop_food_respects_capacity_and_bounds();
     test_same_seed_is_reproducible();
     test_different_seed_diverges();

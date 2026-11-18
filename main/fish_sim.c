@@ -155,10 +155,12 @@ static void step_fish(fish_sim_t *sim, fish_sim_fish_t *fish, uint8_t index) {
     }
 
     // 3) 边界处理优先于一切：贴边就掉头朝里。
-    if (fish->x < FISH_SIM_ONE * 2 && DIR_X[target] < 0) target = (uint8_t)((target + 4) % DIR_COUNT);
-    if (fish->x > X_MAX - FISH_SIM_ONE * 2 && DIR_X[target] > 0) target = (uint8_t)((target + 4) % DIR_COUNT);
-    if (fish->y < FISH_SIM_ONE * 2 && DIR_Y[target] < 0) target = (uint8_t)((target + 4) % DIR_COUNT);
-    if (fish->y > Y_MAX - FISH_SIM_ONE * 2 && DIR_Y[target] > 0) target = (uint8_t)((target + 4) % DIR_COUNT);
+    // 边界掉头：留 1 格余量。原来留 2 格，而鱼食会落到最底一行，于是所有鱼
+    // 都卡在"够得着的高度之上"，围着底部的鱼食抽动，永远吃不到（真机复现）。
+    if (fish->x < FISH_SIM_EDGE_MARGIN && DIR_X[target] < 0) target = (uint8_t)((target + 4) % DIR_COUNT);
+    if (fish->x > X_MAX - FISH_SIM_EDGE_MARGIN && DIR_X[target] > 0) target = (uint8_t)((target + 4) % DIR_COUNT);
+    if (fish->y < FISH_SIM_EDGE_MARGIN && DIR_Y[target] < 0) target = (uint8_t)((target + 4) % DIR_COUNT);
+    if (fish->y > Y_MAX - FISH_SIM_EDGE_MARGIN && DIR_Y[target] > 0) target = (uint8_t)((target + 4) % DIR_COUNT);
 
     // 4) 每步最多转 45°，游动才像鱼而不是瞬移。
     int8_t delta = dir_delta(fish->dir, target);
@@ -195,9 +197,10 @@ void fish_sim_step(fish_sim_t *sim) {
     for (int f = (int)sim->food_count - 1; f >= 0; f--) {
         if (sim->food[f].vy > 0) {
             int32_t ny = (int32_t)sim->food[f].y + sim->food[f].vy;
-            if (ny >= Y_MAX) {
-                sim->food[f].y = Y_MAX;
-                sim->food[f].vy = 0;      // 触底停住
+            const int32_t rest = Y_MAX - FISH_SIM_EDGE_MARGIN;
+            if (ny >= rest) {
+                sim->food[f].y = (int16_t)rest;
+                sim->food[f].vy = 0;      // 触底停住（停在鱼够得到的高度）
             } else {
                 sim->food[f].y = (int16_t)ny;
             }

@@ -86,7 +86,8 @@ void fish_sim_init(fish_sim_t *sim, uint8_t fish_count, uint32_t seed) {
                                    + FISH_SIM_ONE / 2);
         sim->fish[i].y = (int16_t)(((int32_t)(i / FISH_SIM_COLS) * 5 + 4) * FISH_SIM_ONE);
         sim->fish[i].dir = (uint8_t)(i % DIR_COUNT);
-        sim->fish[i].pad = 0;
+        // 每三条里有一条换配色：同一种鱼、不同颜色，画面才不死板。
+        sim->fish[i].tint = (uint8_t)((i % 3 == 2) ? 1 : 0);
     }
 }
 
@@ -148,8 +149,8 @@ static void step_fish(fish_sim_t *sim, fish_sim_fish_t *fish, uint8_t index) {
         target = dir_from_vector(nearest_fish_dx, nearest_fish_dy);
     } else if (nearest_food_d2 < (int32_t)FISH_SIM_SIGHT * FISH_SIM_SIGHT) {
         target = dir_from_vector(nearest_food_dx, nearest_food_dy);
-    } else if ((rng_next(sim) & 0x0F) == 0) {
-        // 1/16 概率随机转向，让没有目标时也不至于笔直撞墙。
+    } else if (fish->hold == 0 && (rng_next(sim) & 0x1F) == 0) {
+        // 空闲时偶尔随机转向（1/32，且进食后 8 步内不转）。
         target = (uint8_t)((fish->dir + ((rng_next(sim) & 1) ? 1 : DIR_COUNT - 1)) % DIR_COUNT);
     }
 
@@ -174,12 +175,13 @@ static void step_fish(fish_sim_t *sim, fish_sim_fish_t *fish, uint8_t index) {
     fish->y = clamp_q8(ny, Y_MAX);
 }
 
-static void eat_nearby_food(fish_sim_t *sim, const fish_sim_fish_t *fish) {
-    const int32_t reach = FISH_SIM_ONE / 2;   // 半格内算吃到
+static void eat_nearby_food(fish_sim_t *sim, fish_sim_fish_t *fish) {
+    const int32_t reach = FISH_SIM_EAT;
     for (int f = (int)sim->food_count - 1; f >= 0; f--) {
         if (abs32(fish->x - sim->food[f].x) <= reach &&
             abs32(fish->y - sim->food[f].y) <= reach) {
             remove_food(sim, f);
+            fish->hold = FISH_SIM_EAT_HOLD;   // 刚吃完，保持航向，别立刻掉头
         }
     }
 }
@@ -208,6 +210,7 @@ void fish_sim_step(fish_sim_t *sim) {
     }
 
     for (uint8_t i = 0; i < sim->fish_count; i++) {
+        if (sim->fish[i].hold > 0) sim->fish[i].hold--;
         step_fish(sim, &sim->fish[i], i);
         eat_nearby_food(sim, &sim->fish[i]);
     }

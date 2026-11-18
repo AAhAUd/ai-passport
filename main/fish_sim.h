@@ -15,14 +15,17 @@
 #define FISH_SIM_MAX_FOOD    6
 
 #define FISH_SIM_ONE         256      // 一格 = 256（Q8）
-#define FISH_SIM_SPEED       20       // 每步位移，约 0.078 格；一格约 13 步
+#define FISH_SIM_SPEED       30       // 每步位移，约 0.117 格；一格约 8.5 步
 #define FISH_SIM_SEPARATION  320      // 1.25 格内开始避让
 #define FISH_SIM_SIGHT       3584     // 14 格内能感知鱼食
+#define FISH_SIM_EAT         256      // 半格内算吃到（放宽后不会擦身而过）
+#define FISH_SIM_EAT_HOLD    8        // 吃到后保持航向的步数，避免立刻掉头
 
 typedef struct {
     int16_t  x, y;      // Q8 格坐标
     uint8_t  dir;       // 0..7 八方向索引
-    uint8_t  pad;
+    uint8_t  tint;      // 配色索引：渲染层据此换一套颜色，行为完全相同
+    uint8_t  hold;       // 进食后的"惯性"计数：>0 时不做随机转向
 } fish_sim_fish_t;
 
 typedef struct {

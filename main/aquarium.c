@@ -330,10 +330,13 @@ static void scene_bubbles(void) {
 }
 
 static void scene_food(void) {
+    // 碎屑感：不用整格的 '@'/'*'，改用点状字符，三种交替，像散落的饲料碎屑。
+    // 字模里 '.' 是 2x2 的小点、',' 是带尾的小点、'\'' 是很短的撇，都远小于一格。
+    static const char CRUMB[3] = { '.', ',', '\'' };
     for (uint8_t i = 0; i < s_sim.food_count; i++) {
         int x = fish_sim_cell_x(s_sim.food[i].x);
         int y = fish_sim_cell_y(s_sim.food[i].y);
-        put_cell(x, y, '@', s_c_food);
+        put_cell(x, y, CRUMB[i % 3], s_c_food);
     }
 }
 
@@ -479,7 +482,7 @@ static void aquarium_task(void *arg) {
                 int16_t x = (int16_t)(((COLS / 2) + spread) * FISH_SIM_ONE);
                 if (x < FISH_SIM_ONE) x = FISH_SIM_ONE;
                 if (x > (COLS - 2) * FISH_SIM_ONE) x = (int16_t)((COLS - 2) * FISH_SIM_ONE);
-                int16_t vy = (int16_t)(34 + (esp_random() % 14));  // 0.13~0.19 格/步
+                int16_t vy = (int16_t)(42 + (esp_random() % 10));  // 0.16~0.20 格/步
                 fish_sim_drop_food_ex(&s_sim, x, 0, vy, 1500);
             }
         }

@@ -14,9 +14,14 @@ demo_nav_result_t demo_navigation_handle(demo_navigation_t *navigation,
 
     if (navigation->active >= 0) {
         result.index = (size_t)navigation->active;
-        result.action = input == DEMO_NAV_INPUT_OK_LONG
-                      ? DEMO_NAV_ACTION_EXIT
-                      : DEMO_NAV_ACTION_FORWARD;
+        if (input == DEMO_NAV_INPUT_EXIT_LONG) {
+            result.action = DEMO_NAV_ACTION_EXIT;
+        } else if (input == DEMO_NAV_INPUT_OK_LONG) {
+            // 长按 OK 在页面里是"该页自己的动作"（鱼缸页用来投喂），不再退出。
+            result.action = DEMO_NAV_ACTION_FORWARD;
+        } else {
+            result.action = DEMO_NAV_ACTION_FORWARD;
+        }
         return result;
     }
 

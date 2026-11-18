@@ -28,8 +28,15 @@ int main(void) {
     assert(result.action == DEMO_NAV_ACTION_FORWARD);
     assert(result.index == 0);
 
+    // 页面里长按 OK 是页面自己的动作（鱼缸页=投喂），不再退出
     result = demo_navigation_handle(&navigation, DEMO_NAV_INPUT_OK_LONG, true);
+    assert(result.action == DEMO_NAV_ACTION_FORWARD);
+    assert(navigation.active == 0);
+
+    // 退出改为显式的 DOWN 长按
+    result = demo_navigation_handle(&navigation, DEMO_NAV_INPUT_EXIT_LONG, true);
     assert(result.action == DEMO_NAV_ACTION_EXIT);
+    assert(navigation.active == 0);       // 退出要等 EXIT 处理完再清 active
     assert(navigation.active == 0);
 
     demo_navigation_complete_exit(&navigation);

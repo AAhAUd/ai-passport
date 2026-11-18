@@ -34,13 +34,16 @@ class KeyWakeGuardWiringTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main = read("main/main.c")
 
-    def test_on_key_consumes_the_guard_before_the_readiness_check(self) -> None:
-        # A release can arrive after the post-init voltage sample but before input
-        # dispatch is ready. on_key must run the guard first so that release still
-        # disarms it, instead of being discarded by the readiness early-return.
+    def test_on_key_consumes_the_guard_before_dispatching_actions(self) -> None:
+        # 鱼缸应用没有独立的输入任务（渲染任务独占面板），因此基线 demo 里
+        # "dispatch 未就绪就早退"的分支不存在。守卫的契约不变：先消费守卫，
+        # 再执行任何按键动作，否则唤醒那一下会被当成真实操作。
         body = function_body(self.main, "on_key")
         self.assertIn("key_guard_consume(", body)
-        self.assertLess(body.index("key_guard_consume("), body.index("!s_input_ready"))
+        guard_at = body.index("key_guard_consume(")
+        for action in ("aquarium_feed(", "aquarium_brightness_step("):
+            self.assertIn(action, body)
+            self.assertLess(guard_at, body.index(action))
 
 
 if __name__ == "__main__":

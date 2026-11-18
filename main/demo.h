@@ -39,7 +39,3 @@ void demo_low_power_enter(void); void demo_low_power_exit(void);
 void demo_low_power_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 esp_err_t demo_low_power_start(void); esp_err_t demo_low_power_stop(void);
 
-// 冒烟页:ASCII 全屏网格吞吐量测量,只为取帧率数据,不属于产品 UI。
-void demo_fish_enter(void);    void demo_fish_exit(void);
-void demo_fish_key(bsp_btn_t btn, bsp_btn_ev_t ev);
-esp_err_t demo_fish_start(void); esp_err_t demo_fish_stop(void);

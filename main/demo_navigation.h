@@ -9,6 +9,7 @@ typedef enum {
     DEMO_NAV_INPUT_DOWN_CLICK,
     DEMO_NAV_INPUT_OK_CLICK,
     DEMO_NAV_INPUT_OK_LONG,
+    DEMO_NAV_INPUT_EXIT_LONG,   // 显式退出（DOWN 长按）：页面里按 OK 再频繁也不会误退
 } demo_nav_input_t;
 
 typedef enum {

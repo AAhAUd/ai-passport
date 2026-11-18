@@ -531,9 +531,10 @@ static void aquarium_task(void *arg) {
         s_force_full = false;
         if (sim_steps > 0) s_tick++;
 
-        if (target_fps < 40) {
-            vTaskDelay(pdMS_TO_TICKS(1000 / target_fps));
-        }
+        // 每帧让出一次 CPU。不这样做渲染任务会空转到 150+ fps（脏行跳过让单帧只有
+        // 6 ms），IDLE 任务被饿死，任务看门狗每 5 秒报一次。让出 1 个 tick 后帧率
+        // 自然落在 ~60 fps，既够顺滑，也给空闲任务和其他任务留出时间片。
+        vTaskDelay(pdMS_TO_TICKS(target_fps < 40 ? (1000 / target_fps) : 1));
 #if AQUARIUM_DIAG_LOG
         int64_t total = esp_timer_get_time() - t0;
         sum += total;

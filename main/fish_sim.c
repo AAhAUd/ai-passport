@@ -16,6 +16,9 @@ static const int8_t DIR_Y[DIR_COUNT] = { 0, 1, 1, 1, 0, -1, -1, -1 };
 #define X_MAX ((FISH_SIM_COLS - 1) * FISH_SIM_ONE)
 #define Y_MAX ((FISH_SIM_ROWS - 1) * FISH_SIM_ONE)
 
+int8_t fish_sim_dir_dx(uint8_t dir) { return DIR_X[dir % DIR_COUNT]; }
+int8_t fish_sim_dir_dy(uint8_t dir) { return DIR_Y[dir % DIR_COUNT]; }
+
 static uint32_t rng_next(fish_sim_t *sim) {
     uint32_t x = sim->rng;
     x ^= x << 13;
@@ -87,14 +90,19 @@ void fish_sim_init(fish_sim_t *sim, uint8_t fish_count, uint32_t seed) {
     }
 }
 
-int fish_sim_drop_food(fish_sim_t *sim, int16_t x, int16_t y, uint16_t ttl) {
+int fish_sim_drop_food_ex(fish_sim_t *sim, int16_t x, int16_t y, int16_t vy, uint16_t ttl) {
     if (!sim || sim->food_count >= FISH_SIM_MAX_FOOD) return -1;
     int idx = sim->food_count;
     sim->food[idx].x = clamp_q8(x, X_MAX);
     sim->food[idx].y = clamp_q8(y, Y_MAX);
+    sim->food[idx].vy = vy;
     sim->food[idx].ttl = ttl;
     sim->food_count++;
     return idx;
+}
+
+int fish_sim_drop_food(fish_sim_t *sim, int16_t x, int16_t y, uint16_t ttl) {
+    return fish_sim_drop_food_ex(sim, x, y, 0, ttl);
 }
 
 int fish_sim_drop_food_center(fish_sim_t *sim, uint16_t ttl) {
@@ -181,8 +189,17 @@ void fish_sim_step(fish_sim_t *sim) {
 
     sim->tick++;
 
-    // 先老化鱼食：ttl 到期的提前消失，避免越堆越多的死点。
+    // 先推进鱼食：先下落，再老化。落到底部的鱼食停在原地等鱼来吃。
     for (int f = (int)sim->food_count - 1; f >= 0; f--) {
+        if (sim->food[f].vy > 0) {
+            int32_t ny = (int32_t)sim->food[f].y + sim->food[f].vy;
+            if (ny >= Y_MAX) {
+                sim->food[f].y = Y_MAX;
+                sim->food[f].vy = 0;      // 触底停住
+            } else {
+                sim->food[f].y = (int16_t)ny;
+            }
+        }
         if (sim->food[f].ttl == 0) {
             remove_food(sim, f);
         } else {

@@ -15,7 +15,7 @@
 #define FISH_SIM_MAX_FOOD    6
 
 #define FISH_SIM_ONE         256      // 一格 = 256（Q8）
-#define FISH_SIM_SPEED       42       // 每步位移，约 0.164 格；一格约 6 步
+#define FISH_SIM_SPEED       20       // 每步位移，约 0.078 格；一格约 13 步
 #define FISH_SIM_SEPARATION  320      // 1.25 格内开始避让
 #define FISH_SIM_SIGHT       3584     // 14 格内能感知鱼食
 
@@ -27,6 +27,7 @@ typedef struct {
 
 typedef struct {
     int16_t  x, y;      // Q8 格坐标
+    int16_t  vy;        // 下落速度（Q8/步）；0 表示静止悬浮
     uint16_t ttl;       // 剩余存活步数
 } fish_sim_food_t;
 
@@ -45,9 +46,20 @@ void fish_sim_init(fish_sim_t *sim, uint8_t fish_count, uint32_t seed);
 // 推进一步（调用方按固定帧率调用，行为与步数绑定，不依赖真实时间）。
 void fish_sim_step(fish_sim_t *sim);
 
-// 在 (x, y) 撒一份鱼食（Q8 坐标），ttl 为存活步数。
-// 成功返回下标，表满返回 -1。超出网格的坐标会被夹进网格内。
+// 在 (x, y) 撒一份鱼食（Q8 坐标），ttl 为存活步数。vy 为每步下落速度，
+// 传 0 则悬浮不动。成功返回下标，表满返回 -1，越界坐标会被夹进网格。
+int fish_sim_drop_food_ex(fish_sim_t *sim, int16_t x, int16_t y, int16_t vy, uint16_t ttl);
+
+// 上面的简化版：悬浮、不下落。
 int fish_sim_drop_food(fish_sim_t *sim, int16_t x, int16_t y, uint16_t ttl);
 
 // 把鱼食放到网格正中，方便按键投喂时不必自己算坐标。
 int fish_sim_drop_food_center(fish_sim_t *sim, uint16_t ttl);
+
+// 朝向索引对应的单位向量（给渲染层选字形用）。
+int8_t fish_sim_dir_dx(uint8_t dir);
+int8_t fish_sim_dir_dy(uint8_t dir);
+
+// Q8 坐标转格坐标。渲染层只关心格子，不关心亚格精度。
+static inline int fish_sim_cell_x(int16_t q8) { return q8 / FISH_SIM_ONE; }
+static inline int fish_sim_cell_y(int16_t q8) { return q8 / FISH_SIM_ONE; }

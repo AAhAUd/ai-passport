@@ -72,6 +72,28 @@ static void test_food_expires_without_fish(void) {
     assert(sim.food_count == 0);
 }
 
+static void test_food_falls_and_lands(void) {
+    fish_sim_t sim;
+    fish_sim_init(&sim, 0, 11);
+    assert(fish_sim_drop_food_ex(&sim, 5 * FISH_SIM_ONE, 0, 50, 3000) == 0);
+    int16_t y0 = sim.food[0].y;
+    fish_sim_step(&sim);
+    assert(sim.food[0].y > y0);          // 一步之后确实往下走了
+
+    for (int i = 0; i < 2000; i++) fish_sim_step(&sim);
+    assert(sim.food_count == 1);          // ttl 还没到，不该消失
+    assert(sim.food[0].y == Y_MAX);       // 停在缸底
+    assert(sim.food[0].vy == 0);          // 触底后不再下落
+
+    // 悬浮鱼食（vy=0）不应该自己动
+    fish_sim_t still;
+    fish_sim_init(&still, 0, 12);
+    assert(fish_sim_drop_food(&still, 3 * FISH_SIM_ONE, 7 * FISH_SIM_ONE, 100) == 0);
+    int16_t yb = still.food[0].y;
+    for (int i = 0; i < 20; i++) fish_sim_step(&still);
+    assert(still.food[0].y == yb);
+}
+
 static void test_drop_food_respects_capacity_and_bounds(void) {
     fish_sim_t sim;
     fish_sim_init(&sim, 2, 9);
@@ -119,6 +141,7 @@ int main(void) {
     test_fish_actually_move();
     test_food_gets_eaten();
     test_food_expires_without_fish();
+    test_food_falls_and_lands();
     test_drop_food_respects_capacity_and_bounds();
     test_same_seed_is_reproducible();
     test_different_seed_diverges();

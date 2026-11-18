@@ -40,6 +40,8 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         return;
     }
 
+    aquarium_note_activity();   // 任何按键都算"有人在看"：重置省电计时并唤醒
+
     // 回调跑在 esp_timer 任务里，只做投递/写 LEDC，不能阻塞。
     switch (btn) {
     case BSP_BTN_OK:

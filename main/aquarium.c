@@ -10,6 +10,7 @@
 //   3. 鱼、气泡、鱼食都放慢，鱼食改成固定 '*' 并一次撒三粒，不再闪烁
 #include "bsp_display.h"
 #include "fish_sim.h"
+#include "idle_policy.h"
 #include "ascii_font.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_heap_caps.h"
@@ -80,6 +81,9 @@ static uint32_t s_tick;
 static uint64_t s_sprite_rows_now;
 static uint64_t s_sprite_rows_prev;
 static uint8_t  s_backlight = 100;
+static power_state_t s_power = POWER_ACTIVE;
+static int64_t  s_last_input_us;
+static volatile bool s_force_full;   // 从息屏唤醒后要整屏重画一次
 
 static uint16_t s_c_fish;
 static uint16_t s_c_fish_dim;
@@ -439,7 +443,8 @@ static void aquarium_task(void *arg) {
     int64_t sum = 0;
     int frames = 0;
 #endif
-    bool force_full = true;
+    s_last_input_us = esp_timer_get_time();
+    s_force_full = true;
     int64_t last_sim_us = esp_timer_get_time();
     const int64_t sim_period_us = 33333;   // 30 Hz
 
@@ -448,6 +453,18 @@ static void aquarium_task(void *arg) {
              (unsigned)esp_get_free_heap_size());
 
     while (s_run) {
+        // 省电：按"多久没按键"推进状态。SLEEP 时完全不渲染，只等按键。
+        const int64_t idle_us = esp_timer_get_time() - s_last_input_us;
+        const power_state_t next = power_state_next(s_power, idle_us);
+        if (next != s_power) {
+            if (next == POWER_SLEEP) bsp_display_backlight(0);
+            s_power = next;
+        }
+        const int target_fps = power_state_target_fps(s_power);
+        if (target_fps == 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
 #if AQUARIUM_DIAG_LOG
         int64_t t0 = esp_timer_get_time();
 #endif
@@ -497,7 +514,7 @@ static void aquarium_task(void *arg) {
         for (int s = 0; s < STRIPS; s++) {
             const uint64_t row_bit = (1ULL << s);
             const bool sprite_touched = ((s_sprite_rows_now | s_sprite_rows_prev) & row_bit) != 0;
-            if (!force_full && !sprite_touched && !strip_changed(s)) continue;
+            if (!s_force_full && !sprite_touched && !strip_changed(s)) continue;
             int buf = s & (NBUF - 1);
             fill_strip(s_strip[buf], s);
             esp_lcd_panel_draw_bitmap(s_panel, 0, s * STRIP_H, COLS * CELL,
@@ -508,9 +525,12 @@ static void aquarium_task(void *arg) {
             esp_rom_delay_us((uint32_t)STRIP_TRANSFER_US);
             strip_mark_drawn(s);
         }
-        force_full = false;
+        s_force_full = false;
         if (sim_steps > 0) s_tick++;
 
+        if (target_fps < 40) {
+            vTaskDelay(pdMS_TO_TICKS(1000 / target_fps));
+        }
 #if AQUARIUM_DIAG_LOG
         int64_t total = esp_timer_get_time() - t0;
         sum += total;
@@ -584,6 +604,15 @@ void aquarium_brightness_step(int delta) {
     if (level > 100) level = 100;
     s_backlight = (uint8_t)level;
     bsp_display_backlight(s_backlight);
+}
+
+void aquarium_note_activity(void) {
+    s_last_input_us = esp_timer_get_time();
+    if (s_power != POWER_ACTIVE) {
+        s_power = POWER_ACTIVE;
+        bsp_display_backlight(s_backlight);   // 从息屏回来：恢复用户的亮度
+        s_force_full = true;                  // 屏上可能是旧的，整屏重画
+    }
 }
 
 esp_err_t aquarium_stop(void) {

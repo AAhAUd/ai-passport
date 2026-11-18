@@ -15,3 +15,6 @@ void aquarium_feed(void);
 
 // 背光增减；夹在 20..100 %。
 void aquarium_brightness_step(int delta);
+
+// 任何按键都调一次：用于把省电计时归零，并从息屏状态唤醒。
+void aquarium_note_activity(void);

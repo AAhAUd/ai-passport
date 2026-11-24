@@ -78,12 +78,27 @@ static uint32_t s_tick;
 // 的那几行必须强制重绘 —— 否则屏幕上会留下残影（真机验证过）。
 static uint64_t s_sprite_rows_now;
 static uint64_t s_sprite_rows_prev;
+// 草尖摇摆：只挑 3 丛前景草，最上面几像素左右偏 1 px。
+// 这些行每帧都从底图重铺再画，所以不会重影（和精灵一个道理），只需强制标脏。
+#define SWAY_CLUMPS 3
+#define SWAY_BASE_Y 272        // 草皮上沿（像素行）
+#define SWAY_HEIGHT 6          // 摆动的那几像素（4 太短，看不出摆动）
+
+typedef struct {
+    int16_t x;                 // 草尖基准列（像素）
+    int8_t  off;               // 当前偏移 -1 / 0 / 1
+} sway_t;
+
+static sway_t s_sway[SWAY_CLUMPS];
+static uint64_t s_sway_rows;   // 需要强制重绘的字符行
+
 static uint8_t  s_backlight = 100;
 static power_state_t s_power = POWER_ACTIVE;
 static int64_t  s_last_input_us;
 static volatile bool s_force_full;   // 从息屏唤醒后要整屏重画一次
 
 static uint16_t s_c_bubble;
+static uint16_t s_c_blade_light, s_c_blade_dark;
 static uint16_t s_c_food;
 // 气泡：每 period 帧上浮一格（远慢于帧率，才有水里慢慢升起的感觉）。
 typedef struct {
@@ -135,6 +150,8 @@ static void palette_init(void) {
     // 动态元素配色。上一轮清理旧配色时把这两行一起删掉了，导致气泡和鱼食
     // 拿到 0（纯黑）—— 真机上就是"气泡变黑"。
     s_c_bubble = rgb565(72, 132, 152);   // 压暗一档：屏上像"水里的气泡"，不是发光点
+    s_c_blade_light = rgb565(125, 220, 88);
+    s_c_blade_dark  = rgb565(44, 138, 57);
     s_c_food   = rgb565(255, 245, 170);
 
     // 水体三段渐变（取自草图）：顶部偏绿、中部深蓝、底部近黑。
@@ -237,6 +254,30 @@ static void fill_strip(uint16_t *dst, int strip) {
         }
     }
 
+    // 1a) 草尖：在底图之上补几像素，尖端随相位偏 1 px
+    {
+        const int top = strip * STRIP_H;
+        for (int c = 0; c < SWAY_CLUMPS; c++) {
+            const int8_t off = s_sway[c].off;
+            // 每丛两根叶片：左边高的跟摆动，右边矮的慢半拍
+            for (int blade = 0; blade < 2; blade++) {
+                const int bx = s_sway[c].x + blade * 3;
+                const int height = SWAY_HEIGHT - blade * 2;
+                const int8_t boff = blade ? (int8_t)(off / 2) : off;   // 第二片慢半拍（整数，避免无 FPU 的浮点）
+                for (int k = 0; k < height; k++) {
+                    const int y = SWAY_BASE_Y - k;
+                    if (y < top || y >= top + STRIP_H) continue;
+                    // 越靠尖越跟得上摆动，根部不动
+                    const int lean = (k * 2 >= height) ? boff : 0;
+                    const int px = bx + lean;
+                    if (px < 0 || px >= COLS * CELL) continue;
+                    uint16_t *line = dst + (size_t)(y - top) * (COLS * CELL);
+                    line[px] = (k < 2) ? s_c_blade_light : s_c_blade_dark;
+                }
+            }
+        }
+    }
+
     // 1b) 字符层：只叠动态内容（气泡、鱼食），空白格跳过
     for (int row = 0; row < STRIP_ROWS; row++) {
         int gy = strip * STRIP_ROWS + row;
@@ -283,6 +324,30 @@ static void fill_strip(uint16_t *dst, int strip) {
                 else if (x < soft || x >= w - soft) line[x] = (uint16_t)((line[x] >> 1) & 0x7BEF);
             }
         }
+    }
+}
+
+static void init_sway(void) {
+    // 选在草皮上方的"空隙"列：这样尖端是贴着水体摆的，看得见。
+    // （选在已有的高草丛里，摆动会被草色吃掉。）
+    static const int16_t xs[SWAY_CLUMPS] = { 44, 148, 202 };
+    for (int i = 0; i < SWAY_CLUMPS; i++) {
+        s_sway[i].x = xs[i];
+        s_sway[i].off = 0;
+    }
+    s_sway_rows = 0;
+    for (int y = SWAY_BASE_Y - SWAY_HEIGHT; y <= SWAY_BASE_Y; y++) {
+        int row = y / CELL;
+        if (row >= 0 && row < ROWS) s_sway_rows |= (1ULL << row);
+    }
+}
+
+static void sway_step(void) {
+    // 每 10 个 tick（约 0.33 秒）换一档，8 档一个来回 ≈ 2.6 秒摆一次。
+    // 之前每 4 tick 换一次（7.5 Hz）+ 只偏 1 px，肉眼会当成噪点而不是摆动。
+    static const int8_t pattern[8] = { 0, 1, 2, 1, 0, -1, -2, -1 };
+    for (int i = 0; i < SWAY_CLUMPS; i++) {
+        s_sway[i].off = pattern[(s_tick / 10 + (uint32_t)i * 3) & 7];
     }
 }
 
@@ -351,6 +416,8 @@ static void aquarium_task(void *arg) {
         if (sim_steps > 0) {
             fish_sim_step(&s_sim);
             bubble_step();
+            s_tick++;
+            sway_step();
         }
         scene_compose();
 
@@ -371,7 +438,8 @@ static void aquarium_task(void *arg) {
         for (int s = 0; s < STRIPS; s++) {
             const uint64_t row_bit = (1ULL << s);
             const bool sprite_touched = ((s_sprite_rows_now | s_sprite_rows_prev) & row_bit) != 0;
-            if (!s_force_full && !sprite_touched && !strip_changed(s)) continue;
+            const bool sway_touched = (s_sway_rows & row_bit) != 0;
+            if (!s_force_full && !sprite_touched && !sway_touched && !strip_changed(s)) continue;
             int buf = s & (NBUF - 1);
             fill_strip(s_strip[buf], s);
             esp_lcd_panel_draw_bitmap(s_panel, 0, s * STRIP_H, COLS * CELL,
@@ -383,7 +451,6 @@ static void aquarium_task(void *arg) {
             strip_mark_drawn(s);
         }
         s_force_full = false;
-        if (sim_steps > 0) s_tick++;
 
         // 按目标帧间隔补齐延时。tick 是 1 ms（CONFIG_FREERTOS_HZ=1000），所以之前
         // 的固定 vTaskDelay(1) 只让出 1 ms，满档实际跑到 110+ fps —— 纯浪费电。
@@ -440,6 +507,7 @@ esp_err_t aquarium_start(void) {
     }
 
     palette_init();
+    init_sway();
     sprites_init();
     mask_init();
     init_scene_objects();

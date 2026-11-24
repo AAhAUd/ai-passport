@@ -508,6 +508,18 @@ static void aquarium_task(void *arg) {
                      (unsigned)__builtin_popcountll(bubble_rows_mask()),
                      (unsigned)__builtin_popcountll(s_sway_rows),
                      ANIM_ROW_BUDGET);
+            {
+                // 行为健康度：贴边（距任一边 2 格内）的个体占比。长时间运行如果
+                // 长期偏高，说明有生物卡角落或层带参数不对。
+                int near_edge = 0;
+                for (uint8_t i = 0; i < s_sim.fish_count; i++) {
+                    const int cx = s_sim.fish[i].x / FISH_SIM_ONE;
+                    const int cy = s_sim.fish[i].y / FISH_SIM_ONE;
+                    if (cx < 2 || cx > COLS - 3 || cy < 2 || cy > ROWS - 3) near_edge++;
+                }
+                ESP_LOGI(TAG, "行为: 贴边 %d/%u，鱼食 %u",
+                         near_edge, (unsigned)s_sim.fish_count, s_sim.food_count);
+            }
             ESP_LOGI(TAG, "动画行合计 %u（预算 %d，%s）",
                      (unsigned)__builtin_popcountll(
                          (s_sprite_rows_now | s_sprite_rows_prev) | bubble_rows_mask() | s_sway_rows),

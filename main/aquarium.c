@@ -92,6 +92,14 @@ typedef struct {
 static sway_t s_sway[SWAY_CLUMPS];
 static uint64_t s_sway_rows;   // 需要强制重绘的字符行
 
+// 摆动每 10 个 tick 才换一次相位，所以只在相位变化的那一帧重绘这些行。
+// 每帧都重绘会把这 15 行变成常驻开销，实测 work 从 8.4 ms 涨到 19.8 ms 并触发看门狗。
+static bool s_sway_dirty;
+static bool s_sway_allowed = true;
+// 常驻动画行的预算：摆动 + 气泡 + 精灵合计不超过这么多行，超了先砍摆动。
+// 大面积整行位移实测会把 work 从 8.4 ms 推到 19.8 ms 并触发看门狗，所以这里设硬上限。
+#define ANIM_ROW_BUDGET 22
+
 static uint8_t  s_backlight = 100;
 static power_state_t s_power = POWER_ACTIVE;
 static int64_t  s_last_input_us;
@@ -327,6 +335,15 @@ static void fill_strip(uint16_t *dst, int strip) {
     }
 }
 
+static uint64_t bubble_rows_mask(void) {
+    uint64_t mask = 0;
+    for (int i = 0; i < BUBBLE_COUNT; i++) {
+        int r = s_bubbles[i].y;
+        if (r >= 0 && r < ROWS) mask |= (1ULL << r);
+    }
+    return mask;
+}
+
 static void init_sway(void) {
     // 选在草皮上方的"空隙"列：这样尖端是贴着水体摆的，看得见。
     // （选在已有的高草丛里，摆动会被草色吃掉。）
@@ -336,18 +353,24 @@ static void init_sway(void) {
         s_sway[i].off = 0;
     }
     s_sway_rows = 0;
+    // 只有 3 丛草尖会动，所以脏行就这两行
     for (int y = SWAY_BASE_Y - SWAY_HEIGHT; y <= SWAY_BASE_Y; y++) {
-        int row = y / CELL;
-        if (row >= 0 && row < ROWS) s_sway_rows |= (1ULL << row);
+        s_sway_rows |= (1ULL << (y / CELL));
     }
 }
 
 static void sway_step(void) {
-    // 每 10 个 tick（约 0.33 秒）换一档，8 档一个来回 ≈ 2.6 秒摆一次。
-    // 之前每 4 tick 换一次（7.5 Hz）+ 只偏 1 px，肉眼会当成噪点而不是摆动。
+    // 每 16 个 tick（30 Hz）换一档，8 档一个来回 ≈ 4.3 秒；只在这一帧标脏。
+    // 之前每 10 tick 一档（2.7 秒）偏快，长时间看会晕。
     static const int8_t pattern[8] = { 0, 1, 2, 1, 0, -1, -2, -1 };
+    static uint32_t last_phase = 0xFFFFFFFFu;
+    const uint32_t phase = (s_tick / 16) & 7;
+    if (phase != last_phase) {
+        last_phase = phase;
+        s_sway_dirty = true;
+    }
     for (int i = 0; i < SWAY_CLUMPS; i++) {
-        s_sway[i].off = pattern[(s_tick / 10 + (uint32_t)i * 3) & 7];
+        s_sway[i].off = pattern[(phase + (uint32_t)i * 3) & 7];
     }
 }
 
@@ -435,10 +458,20 @@ static void aquarium_task(void *arg) {
             for (int r = r0; r <= r1; r++) s_sprite_rows_now |= (1ULL << r);
         }
 
+        // 常驻动画行预算：精灵覆盖行 + 气泡所在行 + 摆动行，超了就砍摆动
+        const uint64_t anim_rows = (s_sprite_rows_now | s_sprite_rows_prev) |
+                                   bubble_rows_mask() | (s_sway_dirty ? s_sway_rows : 0);
+        const bool s_sway_allowed_now = __builtin_popcountll(anim_rows) <= ANIM_ROW_BUDGET;
+        if (!s_sway_allowed_now && s_sway_dirty) {
+            // 超预算：这一帧只把摆动行让出来，精灵和气泡照常
+        }
+        s_sway_allowed = s_sway_allowed_now;
+
         for (int s = 0; s < STRIPS; s++) {
             const uint64_t row_bit = (1ULL << s);
             const bool sprite_touched = ((s_sprite_rows_now | s_sprite_rows_prev) & row_bit) != 0;
-            const bool sway_touched = (s_sway_rows & row_bit) != 0;
+            const bool sway_touched = s_sway_dirty && (s_sway_rows & row_bit) != 0 &&
+                                      s_sway_allowed;
             if (!s_force_full && !sprite_touched && !sway_touched && !strip_changed(s)) continue;
             int buf = s & (NBUF - 1);
             fill_strip(s_strip[buf], s);
@@ -451,6 +484,7 @@ static void aquarium_task(void *arg) {
             strip_mark_drawn(s);
         }
         s_force_full = false;
+        s_sway_dirty = false;
 
         // 按目标帧间隔补齐延时。tick 是 1 ms（CONFIG_FREERTOS_HZ=1000），所以之前
         // 的固定 vTaskDelay(1) 只让出 1 ms，满档实际跑到 110+ fps —— 纯浪费电。
@@ -468,9 +502,16 @@ static void aquarium_task(void *arg) {
 #if AQUARIUM_DIAG_LOG
         if (frames >= LOG_EVERY) {
             float work = (float)sum / frames / 1000.0f;
-            ESP_LOGI(TAG, "work=%.1f ms/帧 (%.1f fps 上限) heap=%u food=%u",
-                     work, work > 0.01f ? 1000.0f / work : 0.0f,
-                     (unsigned)esp_get_free_heap_size(), s_sim.food_count);
+            ESP_LOGI(TAG, "work=%.1f ms/帧 heap=%u food=%u 动画行: 精灵%u 气泡%u 摆动%u 预算%d",
+                     work, (unsigned)esp_get_free_heap_size(), s_sim.food_count,
+                     (unsigned)__builtin_popcountll(s_sprite_rows_now | s_sprite_rows_prev),
+                     (unsigned)__builtin_popcountll(bubble_rows_mask()),
+                     (unsigned)__builtin_popcountll(s_sway_rows),
+                     ANIM_ROW_BUDGET);
+            ESP_LOGI(TAG, "动画行合计 %u（预算 %d，%s）",
+                     (unsigned)__builtin_popcountll(
+                         (s_sprite_rows_now | s_sprite_rows_prev) | bubble_rows_mask() | s_sway_rows),
+                     ANIM_ROW_BUDGET, s_sway_allowed ? "摆动保留" : "摆动被砍");
             sum = 0;
             frames = 0;
         }

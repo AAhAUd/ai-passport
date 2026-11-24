@@ -94,6 +94,10 @@ run_static_checks() {
         tests/test_idle_policy.c main/idle_policy.c \
         -o "${test_dir}/test_idle_policy"
     "${test_dir}/test_idle_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_sprites.c main/sprites.c \
+        -o "${test_dir}/test_sprites"
+    "${test_dir}/test_sprites"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
         tests/test_bsp_display_rounding.c components/bsp/src/bsp_display_rounding.c \
         -o "${test_dir}/test_bsp_display_rounding"

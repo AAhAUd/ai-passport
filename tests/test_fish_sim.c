@@ -114,6 +114,72 @@ static void test_food_resting_on_the_bottom_is_reachable(void) {
     assert_all_inside(&sim);
 }
 
+// 混合场景：6 喷火灯 + 1 胡子 + 3 虾
+static void test_mixed_has_expected_kinds(void) {
+    fish_sim_t sim;
+    fish_sim_init_mixed(&sim, 20261118u);
+    assert(sim.fish_count == 10);
+    int tetra = 0, pleco = 0, shrimp = 0;
+    for (int i = 0; i < sim.fish_count; i++) {
+        if (sim.fish[i].kind == CRE_TETRA) tetra++;
+        else if (sim.fish[i].kind == CRE_PLECO) pleco++;
+        else if (sim.fish[i].kind == CRE_SHRIMP) shrimp++;
+    }
+    assert(tetra == 6 && pleco == 1 && shrimp == 3);
+    assert_all_inside(&sim);
+}
+
+// 空闲时各自留在自己的层带里（喷火灯中层、胡子底部、虾草皮）
+static void test_bands_hold_when_idle(void) {
+    fish_sim_t sim;
+    fish_sim_init_mixed(&sim, 7);
+    for (int step = 0; step < 3000; step++) {
+        fish_sim_step(&sim);
+        for (int i = 0; i < sim.fish_count; i++) {
+            const int y = sim.fish[i].y / FISH_SIM_ONE;
+            switch (sim.fish[i].kind) {
+            case CRE_TETRA:  assert(y >= 5 && y <= 25); break;   // 允许 1 格转向余量
+            case CRE_PLECO:  assert(y >= 27 && y <= 36); break;
+            case CRE_SHRIMP: assert(y >= 34 && y <= 37); break;  // 硬层带
+            default: assert(0);
+            }
+        }
+    }
+}
+
+// 虾只认落到缸底附近的食物：半空中的食物它不追
+static void test_shrimp_ignores_high_food(void) {
+    fish_sim_t sim;
+    fish_sim_init(&sim, 3, 11);
+    for (int i = 0; i < sim.fish_count; i++) fish_sim_set_kind(&sim, (uint8_t)i, CRE_SHRIMP);
+    // 把虾放到草皮行
+    for (int i = 0; i < sim.fish_count; i++) sim.fish[i].y = 35 * FISH_SIM_ONE;
+
+    assert(fish_sim_drop_food(&sim, 15 * FISH_SIM_ONE, 5 * FISH_SIM_ONE, 6000) == 0);
+    for (int step = 0; step < 600; step++) fish_sim_step(&sim);
+    assert(sim.food_count == 1);      // 半空中的食物没被吃掉
+
+    // 落到缸底后就会被吃
+    sim.food[0].y = (int16_t)(38 * FISH_SIM_ONE);
+    int steps = 0;
+    while (sim.food_count > 0 && steps < 3000) { fish_sim_step(&sim); steps++; }
+    assert(sim.food_count == 0);
+}
+
+// 胡子会停顿（pause 计数出现非零）
+static void test_pleco_pauses(void) {
+    fish_sim_t sim;
+    fish_sim_init(&sim, 1, 3);
+    fish_sim_set_kind(&sim, 0, CRE_PLECO);
+    sim.fish[0].y = 32 * FISH_SIM_ONE;
+    bool paused = false;
+    for (int step = 0; step < 1200 && !paused; step++) {
+        fish_sim_step(&sim);
+        if (sim.fish[0].pause > 0) paused = true;
+    }
+    assert(paused);
+}
+
 static void test_drop_food_respects_capacity_and_bounds(void) {
     fish_sim_t sim;
     fish_sim_init(&sim, 2, 9);
@@ -163,6 +229,10 @@ int main(void) {
     test_food_expires_without_fish();
     test_food_falls_and_lands();
     test_food_resting_on_the_bottom_is_reachable();
+    test_mixed_has_expected_kinds();
+    test_bands_hold_when_idle();
+    test_shrimp_ignores_high_food();
+    test_pleco_pauses();
     test_drop_food_respects_capacity_and_bounds();
     test_same_seed_is_reproducible();
     test_different_seed_diverges();

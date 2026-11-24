@@ -12,6 +12,8 @@
 #include "fish_sim.h"
 #include "idle_policy.h"
 #include "ascii_font.h"
+#include "aquarium_bg.h"
+#include "sprites.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -35,10 +37,7 @@ static const char *TAG = "aquarium";
 #define STRIP_TRANSFER_US ((int64_t)STRIP_BYTES * 8 / 80 * 115 / 100)
 #define STRIP_PX    (COLS * CELL * STRIP_H)
 
-#define FISH_COUNT       3
-
-// 鱼的像素精灵。它在字符网格之上直接写像素，所以鱼能画出真正的形状，
-// 而水草/气泡仍然是字符 —— 这是"环境是 ASCII、主角是像素"的混合渲染。
+// 生物的像素精灵在 sprites.c 里；这里只按种类取尺寸并叠到条带上。
 #define SPRITE_W         26
 #define SPRITE_H         16
 #define SPR_PIX_NONE     0
@@ -48,8 +47,6 @@ static const char *TAG = "aquarium";
 #define SPR_PIX_EYE      4
 #define SPR_PIX_PUPIL    5
 #define BUBBLE_COUNT     7
-#define SEAWEED_COUNT    7
-#define PLANKTON_COUNT   10
 
 // 默认不打印：USB-JTAG 控制台在没有主机读取时会阻塞，页内持续打日志会让渲染
 // 任务卡死（真机复现：连按 OK 投喂后画面冻结）。要调性能时临时改成 1。
@@ -61,8 +58,9 @@ static uint16_t s_fg[ROWS][COLS];
 // 上一帧的内容，用来判断哪条带真的变了。静止的行不必重推，撕裂窗口随之大幅缩短。
 static char     s_prev_ch[ROWS][COLS];
 static uint16_t s_prev_fg[ROWS][COLS];
-// 背景按“像素行”算而不是按字符行算：字符行只有 40 条，8 像素一条台阶会看成色带。
-static uint16_t s_bg_px[ROWS * CELL];
+// 水体颜色按像素行算（底图里 index 0 就表示水）：三段渐变，字符行只有 40 条，
+// 8 像素一条台阶会看成色带。底图只存植物/沉木/底床/灯条，不存水。
+static uint16_t s_water_px[ROWS * CELL];
 
 #define NBUF 2
 static uint16_t *s_strip[NBUF];   // 双缓冲：一块在 DMA 里传时，另一块可写
@@ -85,105 +83,8 @@ static power_state_t s_power = POWER_ACTIVE;
 static int64_t  s_last_input_us;
 static volatile bool s_force_full;   // 从息屏唤醒后要整屏重画一次
 
-static uint16_t s_c_fish;
-static uint16_t s_c_fish_dim;
-static uint16_t s_c_weed;
 static uint16_t s_c_bubble;
 static uint16_t s_c_food;
-static uint16_t s_c_plankton;
-// 两套鱼的配色：身体 / 描边 / 高光 / 眼白 / 瞳孔。
-typedef struct {
-    uint16_t body, dark, light, eye, pupil;
-} fish_palette_t;
-
-static fish_palette_t s_palettes[2];
-static uint16_t s_c_eye, s_c_pupil;
-// 两帧摆尾的鱼精灵（手绘像素，1:1 上屏）。
-static const uint8_t s_sprite_f0[SPRITE_H][SPRITE_W] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 4, 4, 2, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 5, 4, 2, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 1, 2, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-};
-
-static const uint8_t s_sprite_f1[SPRITE_H][SPRITE_W] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0 },
-    { 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 4, 4, 2, 0, 0, 0 },
-    { 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 5, 4, 2, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 1, 2, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-};
-
-static const uint8_t s_sprite_f2[SPRITE_H][SPRITE_W] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 4, 4, 2, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 5, 4, 2, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 1, 2, 0, 0 },
-    { 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-};
-
-static const uint8_t s_sprite_f3[SPRITE_H][SPRITE_W] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 4, 4, 2, 0, 0, 0 },
-    { 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 3, 3, 3, 3, 3, 3, 4, 5, 4, 2, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 1, 2, 0, 0 },
-    { 0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 0, 0, 2, 2, 2, 2, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
-    { 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0 },
-    { 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0 },
-    { 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-};
-
-// 四帧摆尾：尾巴用行波（相位沿身体到尾部递增）而不是整块摆动，
-// 所以看起来是"甩"而不是"翻"。帧序 0→1→2→3 循环。
-static const uint8_t (*s_sprite_frame(uint8_t phase))[SPRITE_W] {
-    static const uint8_t (*const frames[4])[SPRITE_W] = {
-        s_sprite_f0, s_sprite_f1, s_sprite_f2, s_sprite_f3
-    };
-    return frames[phase & 3];
-}
-
 // 气泡：每 period 帧上浮一格（远慢于帧率，才有水里慢慢升起的感觉）。
 typedef struct {
     int16_t x, y;
@@ -220,17 +121,6 @@ static void mask_init(void) {
     }
 }
 
-static uint16_t sprite_color(uint8_t px, const fish_palette_t *pal) {
-    switch (px) {
-    case SPR_PIX_BODY:  return pal->body;
-    case SPR_PIX_DARK:  return pal->dark;
-    case SPR_PIX_LIGHT: return pal->light;
-    case SPR_PIX_EYE:   return s_c_eye;
-    case SPR_PIX_PUPIL: return s_c_pupil;
-    default:            return 0;
-    }
-}
-
 // RGB565 打包，并把高/低字节对调好再返回。
 //
 // 面板要求高字节先发（bsp 给 LVGL 设的 swap_bytes=true 就是这个原因），而
@@ -242,32 +132,27 @@ static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void palette_init(void) {
-    // 单一形态、单一配色：8 像素的格子里，多种体型只会互相干扰、看不出层次。
-    s_c_fish     = rgb565(255, 170, 70);
-    s_c_fish_dim = rgb565(190, 105, 45);
-    s_c_weed      = rgb565(52, 150, 92);
-    s_c_bubble    = rgb565(120, 190, 210);
-    s_c_food      = rgb565(255, 245, 170);
-    s_c_plankton  = rgb565(26, 52, 74);   // 压暗一档，别和鱼混在一起
-    // 暖橙
-    s_palettes[0].body  = rgb565(255, 170, 70);
-    s_palettes[0].dark  = rgb565(184, 100, 44);
-    s_palettes[0].light = rgb565(255, 215, 150);
-    // 银蓝：和橙色在深蓝水里对比明显，但仍是冷色，不会抢眼
-    s_palettes[1].body  = rgb565(170, 215, 245);
-    s_palettes[1].dark  = rgb565(70, 110, 150);
-    s_palettes[1].light = rgb565(235, 250, 255);
+    // 动态元素配色。上一轮清理旧配色时把这两行一起删掉了，导致气泡和鱼食
+    // 拿到 0（纯黑）—— 真机上就是"气泡变黑"。
+    s_c_bubble = rgb565(72, 132, 152);   // 压暗一档：屏上像"水里的气泡"，不是发光点
+    s_c_food   = rgb565(255, 245, 170);
 
-    s_c_eye   = rgb565(255, 246, 234);
-    s_c_pupil = rgb565(20, 31, 40);
-
+    // 水体三段渐变（取自草图）：顶部偏绿、中部深蓝、底部近黑。
+    static const uint8_t stops[3][3] = {
+        { 0x1b, 0x6a, 0x58 },   // 顶
+        { 0x0b, 0x33, 0x40 },   // 中
+        { 0x06, 0x1a, 0x22 },   // 底
+    };
     for (int py = 0; py < ROWS * CELL; py++) {
-        // 竖直渐变：水面在顶部略亮，越往下越暗。
-        int t = py * 255 / (ROWS * CELL - 1);
-        uint8_t r = (uint8_t)((14 * (255 - t) + 2 * t) / 255);
-        uint8_t g = (uint8_t)((48 * (255 - t) + 7 * t) / 255);
-        uint8_t b = (uint8_t)((80 * (255 - t) + 18 * t) / 255);
-        s_bg_px[py] = rgb565(r, g, b);
+        int q = py * 2 * 1000 / (ROWS * CELL - 1);        // 0..2000
+        int seg = q < 1000 ? 0 : 1;
+        int local = (q - seg * 1000) * 255 / 1000;        // 0..255
+        const uint8_t *a = stops[seg];
+        const uint8_t *b = stops[seg + 1];
+        uint8_t r = (uint8_t)((a[0] * (255 - local) + b[0] * local) / 255);
+        uint8_t g = (uint8_t)((a[1] * (255 - local) + b[1] * local) / 255);
+        uint8_t bb = (uint8_t)((a[2] * (255 - local) + b[2] * local) / 255);
+        s_water_px[py] = rgb565(r, g, bb);
     }
 }
 
@@ -280,31 +165,6 @@ static void put_cell(int x, int y, char ch, uint16_t fg) {
 static void scene_clear(void) {
     for (int y = 0; y < ROWS; y++) {
         memset(s_ch[y], ' ', COLS);
-    }
-}
-
-static void scene_plankton(void) {
-    // 固定的微尘，让画面不是纯空背景
-    for (int i = 0; i < PLANKTON_COUNT; i++) {
-        int x = (i * 7 + 3) % COLS;
-        int y = (i * 11 + 5) % (ROWS - 6);
-        put_cell(x, y, '.', s_c_plankton);
-    }
-}
-
-static void scene_seaweed(void) {
-    for (int i = 0; i < SEAWEED_COUNT; i++) {
-        int col = (i * 5 + 2) % COLS;
-        int height = 5 + ((i * 3) % 6);
-        for (int h = 0; h < height; h++) {
-            int row = ROWS - 1 - h;
-            char ch = '|';
-            // 每 10 帧换一次摆动方向，摆动要慢才像水草。
-            int sway = (int)((s_tick / 10 + (uint32_t)h / 2) % 3);
-            if (sway == 0) ch = '(';
-            else if (sway == 1) ch = ')';
-            put_cell(col, row, ch, s_c_weed);
-        }
     }
 }
 
@@ -342,8 +202,6 @@ static void scene_food(void) {
 
 static void scene_compose(void) {
     scene_clear();
-    scene_plankton();
-    scene_seaweed();
     scene_food();
     scene_bubbles();
 }
@@ -363,55 +221,52 @@ static void strip_mark_drawn(int strip) {
     }
 }
 
-// 把一条鱼画进当前条带（条带是一行 8 像素，鱼高 16 像素会跨两条带）。
-static void draw_sprite_in_strip(uint16_t *dst, int strip, int px, int py,
-                                 const uint8_t spr[SPRITE_H][SPRITE_W], bool mirror,
-                                 const fish_palette_t *pal) {
-    const int strip_top = strip * STRIP_H;
-    for (int sy = 0; sy < SPRITE_H; sy++) {
-        int abs_y = py + sy;
-        if (abs_y < strip_top || abs_y >= strip_top + STRIP_H) continue;
-        int local_y = abs_y - strip_top;
-        for (int sx = 0; sx < SPRITE_W; sx++) {
-            uint8_t pxv = spr[sy][mirror ? (SPRITE_W - 1 - sx) : sx];
-            if (pxv == SPR_PIX_NONE) continue;
-            int abs_x = px + sx;
-            if (abs_x < 0 || abs_x >= COLS * CELL) continue;
-            dst[(size_t)local_y * (COLS * CELL) + abs_x] = sprite_color(pxv, pal);
-        }
-    }
-}
-
 static void fill_strip(uint16_t *dst, int strip) {
-    // 1) 背景 + 字符（水草、气泡、鱼食）
+    // 1) 底图：每个像素来自索引图；index 0 用该行的水色
     for (int row = 0; row < STRIP_ROWS; row++) {
         int gy = strip * STRIP_ROWS + row;
         for (int y = 0; y < CELL; y++) {
-            uint16_t bg = s_bg_px[gy * CELL + y];
+            int py = gy * CELL + y;
+            const uint8_t *src = &s_bg_idx[(size_t)py * BG_W];
+            uint16_t *line = dst + (size_t)(row * CELL + y) * (COLS * CELL);
+            const uint16_t water = s_water_px[py];
+            for (int x = 0; x < BG_W; x++) {
+                uint8_t idx = src[x];
+                line[x] = idx ? s_bg_pal[idx] : water;
+            }
+        }
+    }
+
+    // 1b) 字符层：只叠动态内容（气泡、鱼食），空白格跳过
+    for (int row = 0; row < STRIP_ROWS; row++) {
+        int gy = strip * STRIP_ROWS + row;
+        for (int y = 0; y < CELL; y++) {
             uint16_t *line = dst + (size_t)(row * CELL + y) * (COLS * CELL);
             for (int col = 0; col < COLS; col++) {
-                const uint8_t *bits = ascii_font_glyph(s_ch[gy][col]);
+                char ch = s_ch[gy][col];
+                if (ch == ' ') continue;
+                const uint8_t *bits = ascii_font_glyph(ch);
                 uint8_t b = bits[y];
+                if (b == 0) continue;
                 uint16_t fg = s_fg[gy][col];
                 uint16_t *out = line + col * CELL;
-                if (b == 0) {
-                    for (int x = 0; x < CELL; x++) out[x] = bg;
-                } else {
-                    for (int x = 0; x < CELL; x++) out[x] = (b & (0x80u >> x)) ? fg : bg;
+                for (int x = 0; x < CELL; x++) {
+                    if (b & (0x80u >> x)) out[x] = fg;
                 }
             }
         }
     }
 
-    // 2) 精灵：鱼直接写像素，不受字符格子限制
-    const uint8_t flap = (uint8_t)((s_tick / 2) & 3);
+    // 2) 精灵层：按各自种类取精灵与尺寸（三种生物共用同一条 blit）
+    const int sprite_dy = -strip * STRIP_H;
     for (uint8_t i = 0; i < s_sim.fish_count; i++) {
         const fish_sim_fish_t *f = &s_sim.fish[i];
-        int px = (int)((int32_t)f->x * CELL / FISH_SIM_ONE) - SPRITE_W / 2;
-        int py = (int)((int32_t)f->y * CELL / FISH_SIM_ONE) - SPRITE_H / 2;
-        bool mirror = fish_sim_dir_dx(f->dir) < 0;
-        const fish_palette_t *pal = &s_palettes[f->tint < 2 ? f->tint : 0];
-        draw_sprite_in_strip(dst, strip, px, py, s_sprite_frame(flap), mirror, pal);
+        const sprite_kind_t kind = (sprite_kind_t)(f->kind % CRE_KIND_COUNT);
+        const int w = sprite_w(kind), h = sprite_h(kind);
+        const int px = (int)((int32_t)f->x * CELL / FISH_SIM_ONE) - w / 2;
+        const int py = (int)((int32_t)f->y * CELL / FISH_SIM_ONE) - h / 2;
+        sprite_blit(dst, COLS * CELL, STRIP_H, kind, px, py + sprite_dy,
+                    fish_sim_dir_dx(f->dir) < 0);
     }
 
     // 3) 圆角遮罩（放在最后，精灵也不能越过圆角）
@@ -451,8 +306,8 @@ static void aquarium_task(void *arg) {
     int64_t last_sim_us = esp_timer_get_time();
     const int64_t sim_period_us = 33333;   // 30 Hz
 
-    ESP_LOGI(TAG, "start: %dx%d cells, %d fish, %d strips of %u B, heap %u",
-             COLS, ROWS, FISH_COUNT, STRIPS, (unsigned)STRIP_BYTES,
+    ESP_LOGI(TAG, "start: %dx%d cells, %u creatures, %d strips of %u B, heap %u",
+             COLS, ROWS, (unsigned)s_sim.fish_count, STRIPS, (unsigned)STRIP_BYTES,
              (unsigned)esp_get_free_heap_size());
 
     while (s_run) {
@@ -468,9 +323,7 @@ static void aquarium_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-#if AQUARIUM_DIAG_LOG
-        int64_t t0 = esp_timer_get_time();
-#endif
+        const int64_t frame_start = esp_timer_get_time();
 
         uint8_t feed_req;
         if (xQueueReceive(s_feed_q, &feed_req, 0) == pdTRUE) {
@@ -501,14 +354,15 @@ static void aquarium_task(void *arg) {
         }
         scene_compose();
 
-        // 记录精灵这一帧覆盖了哪些字符行（按像素包围盒换算）
+        // 记录精灵这一帧覆盖了哪些字符行（按像素包围盒换算）。
+        // 字符层的脏检测看不到精灵，所以精灵覆盖的行必须强制重绘，否则留残影。
         s_sprite_rows_prev = s_sprite_rows_now;
         s_sprite_rows_now = 0;
         for (uint8_t i = 0; i < s_sim.fish_count; i++) {
             const fish_sim_fish_t *f = &s_sim.fish[i];
-            int py = (int)((int32_t)f->y * CELL / FISH_SIM_ONE) - SPRITE_H / 2;
-            int r0 = py / CELL;
-            int r1 = (py + SPRITE_H - 1) / CELL;
+            const int h = sprite_h((sprite_kind_t)(f->kind % CRE_KIND_COUNT));
+            int py = (int)((int32_t)f->y * CELL / FISH_SIM_ONE) - h / 2;
+            int r0 = py / CELL, r1 = (py + h - 1) / CELL;
             if (r0 < 0) r0 = 0;
             if (r1 >= ROWS) r1 = ROWS - 1;
             for (int r = r0; r <= r1; r++) s_sprite_rows_now |= (1ULL << r);
@@ -531,13 +385,17 @@ static void aquarium_task(void *arg) {
         s_force_full = false;
         if (sim_steps > 0) s_tick++;
 
-        // 每帧让出一次 CPU。不这样做渲染任务会空转到 150+ fps（脏行跳过让单帧只有
-        // 6 ms），IDLE 任务被饿死，任务看门狗每 5 秒报一次。让出 1 个 tick 后帧率
-        // 自然落在 ~60 fps，既够顺滑，也给空闲任务和其他任务留出时间片。
-        vTaskDelay(pdMS_TO_TICKS(target_fps < 40 ? (1000 / target_fps) : 1));
+        // 按目标帧间隔补齐延时。tick 是 1 ms（CONFIG_FREERTOS_HZ=1000），所以之前
+        // 的固定 vTaskDelay(1) 只让出 1 ms，满档实际跑到 110+ fps —— 纯浪费电。
+        // 现在用 idle_policy 给的目标帧率算预算：55 fps → 18.2 ms/帧。
+        // 同时也保证每帧至少让出一次 CPU，避免饿死 IDLE 触发看门狗。
+        const int64_t budget_us = 1000000 / target_fps;
+        const int64_t spent_us = esp_timer_get_time() - frame_start;
+        if (spent_us < budget_us) {
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)((budget_us - spent_us) / 1000)));
+        }
 #if AQUARIUM_DIAG_LOG
-        int64_t total = esp_timer_get_time() - t0;
-        sum += total;
+        sum += spent_us;
         frames++;
 #endif
 #if AQUARIUM_DIAG_LOG
@@ -582,9 +440,10 @@ esp_err_t aquarium_start(void) {
     }
 
     palette_init();
+    sprites_init();
     mask_init();
     init_scene_objects();
-    fish_sim_init(&s_sim, FISH_COUNT, 20261118u);
+    fish_sim_init_mixed(&s_sim, 20261118u);
     s_tick = 0;
     s_run = true;
 

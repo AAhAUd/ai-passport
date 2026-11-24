@@ -10,7 +10,8 @@
 #define BG_H 320
 #define BG_WATER_INDEX 0
 
-// 调色板长度由生成物里的 BG_PAL_COUNT 给出；这里用不完整类型声明。
+// 调色板长度由生成物给出（夜间调色板要按数量派生）。
+extern const unsigned s_bg_pal_count;
 extern const uint16_t s_bg_pal[];
 
 // 逐行存放，行内从左到右；长度 BG_H * BG_W。

@@ -311,6 +311,9 @@ def write_c(palette, grid, path: Path, meta: str) -> int:
         "",
         f"#define BG_PAL_COUNT {len(palette)}",
         "",
+        "// 固件要按倍数派生一张夜间调色板，所以数量需要是可读取的符号。",
+        "const unsigned s_bg_pal_count = BG_PAL_COUNT;",
+        "",
         "const uint16_t s_bg_pal[BG_PAL_COUNT] = {",
     ]
     for i in range(0, len(palette), 8):

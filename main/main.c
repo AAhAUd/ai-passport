@@ -48,10 +48,10 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         if (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG) aquarium_feed();
         break;
     case BSP_BTN_UP:
-        if (ev == BSP_BTN_CLICK) aquarium_brightness_step(20);
+        if (ev == BSP_BTN_CLICK) aquarium_brightness_step(25);
         break;
     case BSP_BTN_DOWN:
-        if (ev == BSP_BTN_CLICK) aquarium_brightness_step(-20);
+        if (ev == BSP_BTN_CLICK) aquarium_brightness_step(-25);
         break;
     default:
         break;

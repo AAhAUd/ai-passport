@@ -84,11 +84,34 @@ static uint8_t s_px[SPR_COUNT][SPR_MAX_H][SPR_MAX_W];
 // 调色板：s_pal[kind][0] 不用，和索引对齐
 static uint16_t s_pal[SPR_COUNT][SPR_MAX_COLORS + 1];
 static bool s_ready;
+static float s_brightness[SPR_COUNT] = { 1.0f, 1.0f, 1.0f };
 
 // RGB565 打包并把高低字节对调（面板要求高字节先发）。
 static uint16_t rgb565_be(uint8_t r, uint8_t g, uint8_t b) {
     uint16_t v = (uint16_t)(((r & 0xF8u) << 8) | ((g & 0xFCu) << 3) | (b >> 3));
     return (uint16_t)((v >> 8) | (v << 8));
+}
+
+static void rebuild_palette(void) {
+    for (int k = 0; k < SPR_COUNT; k++) {
+        const sprite_src_t *src = &SOURCES[k];
+        const size_t nkeys = strlen(src->keys);
+        s_pal[k][0] = 0;
+        for (size_t i = 0; i < nkeys && i < SPR_MAX_COLORS; i++) {
+            const uint8_t *c = src->colors[i];
+            const float f = s_brightness[k];
+            const uint8_t r = (uint8_t)(c[0] * f > 255.0f ? 255.0f : c[0] * f);
+            const uint8_t g = (uint8_t)(c[1] * f > 255.0f ? 255.0f : c[1] * f);
+            const uint8_t b = (uint8_t)(c[2] * f > 255.0f ? 255.0f : c[2] * f);
+            s_pal[k][i + 1] = rgb565_be(r, g, b);
+        }
+    }
+}
+
+// 夜间模式：喷火灯提亮一档（它是"发光"的主角），其它两种保持原样。
+void sprites_set_night(bool night) {
+    s_brightness[SPR_TETRA] = night ? 1.9f : 1.0f;
+    rebuild_palette();
 }
 
 void sprites_init(void) {

@@ -19,6 +19,9 @@ typedef enum {
 // 建立索引表与调色板（已换字节序）。重复调用安全。
 void sprites_init(void);
 
+// 夜间模式：喷火灯整体提亮一档。其它生物不变。
+void sprites_set_night(bool night);
+
 int sprite_w(sprite_kind_t kind);
 int sprite_h(sprite_kind_t kind);
 

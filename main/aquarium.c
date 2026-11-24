@@ -101,6 +101,24 @@ static bool s_sway_allowed = true;
 #define ANIM_ROW_BUDGET 22
 
 static uint8_t  s_backlight = 100;
+// 夜间模式：背光降到最低档时自动进入。只换调色板（水+底图压暗偏蓝、喷火灯提亮），
+// 不做光晕，也不改按键。
+// 四档亮度：25 / 50 / 75 / 100。最低档同时是夜间模式。
+// 每档的 LEDC 占空比手工给表：线性占空比在人眼看来高亮区几乎没差别，
+// 这张表让四档的"感觉"接近等距（25% 档只给 10% 占空比）。
+#define NIGHT_BACKLIGHT 25
+static const uint8_t BRIGHT_LEVELS[] = { 25, 50, 75, 100 };
+static const uint8_t BRIGHT_DUTY[]   = { 10, 28, 55, 100 };
+#define BRIGHT_STEP 25
+static bool s_night;
+// 换色/换档都交给渲染任务执行（单一所有者）：按键回调只登记意图。
+// 之前按键任务直接关背光、渲染任务恢复，两边抢时序 —— 会出现"背光已恢复但
+// 新调色板还在逐行重画"的窗口，看起来就是一条色带扫过。
+static volatile bool s_night_requested;
+static volatile bool s_backlight_dirty;
+static bool s_restore_backlight;
+static uint16_t s_bg_pal_night[256];
+static uint16_t s_water_night[ROWS * CELL];
 static power_state_t s_power = POWER_ACTIVE;
 static int64_t  s_last_input_us;
 static volatile bool s_force_full;   // 从息屏唤醒后要整屏重画一次
@@ -154,6 +172,8 @@ static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return (uint16_t)((v >> 8) | (v << 8));
 }
 
+static void apply_backlight(void);   // 定义在后面（亮度表附近）
+
 static void palette_init(void) {
     // 动态元素配色。上一轮清理旧配色时把这两行一起删掉了，导致气泡和鱼食
     // 拿到 0（纯黑）—— 真机上就是"气泡变黑"。
@@ -161,6 +181,20 @@ static void palette_init(void) {
     s_c_blade_light = rgb565(125, 220, 88);
     s_c_blade_dark  = rgb565(44, 138, 57);
     s_c_food   = rgb565(255, 245, 170);
+
+    // 夜间底图调色板：整体压到 62% 并偏蓝，模拟只剩环境光。
+    for (unsigned i = 1; i < s_bg_pal_count && i < 256; i++) {
+        uint16_t v = s_bg_pal[i];
+        v = (uint16_t)((v >> 8) | (v << 8));          // 还原成主机序
+        uint8_t r = (uint8_t)(((v >> 11) & 0x1F) * 255 / 31);
+        uint8_t g = (uint8_t)(((v >> 5) & 0x3F) * 255 / 63);
+        uint8_t b = (uint8_t)((v & 0x1F) * 255 / 31);
+        r = (uint8_t)(r * 62 / 100);
+        g = (uint8_t)(g * 66 / 100);
+        b = (uint8_t)(b * 78 / 100 + 12 > 255 ? 255 : b * 78 / 100 + 12);
+        uint16_t nv = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        s_bg_pal_night[i] = (uint16_t)((nv >> 8) | (nv << 8));
+    }
 
     // 水体三段渐变（取自草图）：顶部偏绿、中部深蓝、底部近黑。
     static const uint8_t stops[3][3] = {
@@ -178,6 +212,10 @@ static void palette_init(void) {
         uint8_t g = (uint8_t)((a[1] * (255 - local) + b[1] * local) / 255);
         uint8_t bb = (uint8_t)((a[2] * (255 - local) + b[2] * local) / 255);
         s_water_px[py] = rgb565(r, g, bb);
+        // 夜间水色：再压暗、偏蓝
+        s_water_night[py] = rgb565((uint8_t)(r * 55 / 100),
+                                   (uint8_t)(g * 62 / 100),
+                                   (uint8_t)(bb * 85 / 100 + 6));
     }
 }
 
@@ -254,10 +292,11 @@ static void fill_strip(uint16_t *dst, int strip) {
             int py = gy * CELL + y;
             const uint8_t *src = &s_bg_idx[(size_t)py * BG_W];
             uint16_t *line = dst + (size_t)(row * CELL + y) * (COLS * CELL);
-            const uint16_t water = s_water_px[py];
+            const uint16_t water = s_night ? s_water_night[py] : s_water_px[py];
+            const uint16_t *pal = s_night ? s_bg_pal_night : s_bg_pal;
             for (int x = 0; x < BG_W; x++) {
                 uint8_t idx = src[x];
-                line[x] = idx ? s_bg_pal[idx] : water;
+                line[x] = idx ? pal[idx] : water;
             }
         }
     }
@@ -413,6 +452,18 @@ static void aquarium_task(void *arg) {
         }
         const int64_t frame_start = esp_timer_get_time();
 
+        // 帧首统一处理亮度/夜间切换：先关背光 → 整屏按新调色板重画 → 帧尾恢复
+        if (s_night_requested != s_night) {
+            s_night = s_night_requested;
+            sprites_set_night(s_night);
+            bsp_display_backlight(0);
+            s_force_full = true;
+            s_restore_backlight = true;
+        } else if (s_backlight_dirty) {
+            s_backlight_dirty = false;
+            apply_backlight();
+        }
+
         uint8_t feed_req;
         if (xQueueReceive(s_feed_q, &feed_req, 0) == pdTRUE) {
             // 每次投喂的粒数、落点、下落速度都是随机的：手撒鱼食本来就不均匀，
@@ -485,6 +536,10 @@ static void aquarium_task(void *arg) {
         }
         s_force_full = false;
         s_sway_dirty = false;
+        if (s_restore_backlight) {       // 整屏已按新调色板重画完，恢复背光
+            s_restore_backlight = false;
+            apply_backlight();
+        }
 
         // 按目标帧间隔补齐延时。tick 是 1 ms（CONFIG_FREERTOS_HZ=1000），所以之前
         // 的固定 vTaskDelay(1) 只让出 1 ms，满档实际跑到 110+ fps —— 纯浪费电。
@@ -582,19 +637,29 @@ void aquarium_feed(void) {
     (void)xQueueSend(s_feed_q, &req, 0);   // 队列满就丢，连按不会堆积
 }
 
+static void apply_backlight(void) {
+    const int idx = (int)s_backlight / BRIGHT_STEP - 1;
+    const int clamped = (idx < 0) ? 0 : (idx > 3 ? 3 : idx);
+    bsp_display_backlight(BRIGHT_DUTY[clamped]);
+}
+
 void aquarium_brightness_step(int delta) {
     int level = (int)s_backlight + delta;
-    if (level < 20) level = 20;
-    if (level > 100) level = 100;
+    if (level < BRIGHT_LEVELS[0]) level = BRIGHT_LEVELS[0];
+    if (level > BRIGHT_LEVELS[3]) level = BRIGHT_LEVELS[3];
     s_backlight = (uint8_t)level;
-    bsp_display_backlight(s_backlight);
+    s_night_requested = (s_backlight <= NIGHT_BACKLIGHT);
+    s_backlight_dirty = true;      // 由渲染任务在安全时机应用
+#if AQUARIUM_DIAG_LOG
+    ESP_LOGI(TAG, "亮度: %u%%%s", (unsigned)s_backlight, night ? " （夜间）" : "");
+#endif
 }
 
 void aquarium_note_activity(void) {
     s_last_input_us = esp_timer_get_time();
     if (s_power != POWER_ACTIVE) {
         s_power = POWER_ACTIVE;
-        bsp_display_backlight(s_backlight);   // 从息屏回来：恢复用户的亮度
+        apply_backlight();   // 从息屏回来：恢复用户的亮度（同样走伽马映射）
         s_force_full = true;                  // 屏上可能是旧的，整屏重画
     }
 }
